@@ -1,0 +1,371 @@
+# SET UP
+
+- name: Notifies avios (slack) channel that the deployment has been kicked-off
+  slack:
+    token: "{{ wcs_info.slack.token }}"
+    msg: '@channel ... Deployment started at {{ ansible_date_time.date }}-{{ ansible_date_time.time }}'
+    channel: "{{ wcs_info.slack.channel }}"
+    icon_emoji: ":runner:"
+    username: "Deployment to {{ inventory_hostname }}"
+  when: wcs_info.flags.notify_slack is defined and wcs_info.flags.notify_slack
+  tags:
+    - slack
+    - init
+    - deploy_wcs
+    - deploy_webapp
+
+# Delete any previous installations deployment folder
+- name: Pre Install - Delete installation media on server
+  file:
+        path={{ wcs_info.dirs.wcs_deployment_directory }}
+        state=absent
+        owner={{ wcs_info.creds.fs_username }}
+        group={{ wcs_info.creds.fs_groupname }}
+  tags:
+    - deploy_wcs
+    - deploy_webapp
+
+# Create a directory for logs
+- name: Creates directory for logs
+  file: path={{ wcs_info.dirs.manifesto_logs }} state=directory owner=weblogic group=weblogic
+  tags:
+    - set_up
+    - deploy_wcs
+    - deploy_webapp
+
+# Create a directory for deployment to run from
+- name: Creates directory for installation
+  file: path={{ wcs_info.dirs.wcs_deployment_directory }} state=directory owner=weblogic group=weblogic
+  tags:
+    - set_up
+    - deploy_wcs
+    - deploy_webapp
+
+# Create a directory for scripts
+- name: Creates directory for scripts
+  file: path={{ wcs_info.dirs.wcs_deployment_directory_scripts }} state=directory owner=weblogic group=weblogic
+  tags:
+    - set_up
+    - deploy_wcs
+    - deploy_webapp
+
+# Create a directory for deployment war
+- name: Creates directory for installation of webapp
+  file: path={{ wcs_info.dirs.wcs_deployment_directory_webapp }} state=directory owner=weblogic group=weblogic
+  tags:
+    - set_up
+    - deploy_webapp
+
+# COPY COMPLETE PACKAGE
+- name: Copy complete package
+  unarchive: src=../files/{{ wcs_info.files.package_filename }}.zip dest={{ wcs_info.dirs.wcs_deployment_directory }}
+  tags:
+    - set_up
+    - deploy_wcs
+    - deploy_webapp
+
+# DEPLOY MANIFESTO PLATFORM LIBRARY
+
+- name: Delete existing platform jar
+  shell: "if [ -f {{ wcs_info.dirs.wcs_cs_lib }}/{{ wcs_info.files.cms_platform_filename }}*.jar ]; then /bin/rm {{ wcs_info.dirs.wcs_cs_lib }}/{{ wcs_info.files.cms_platform_filename }}*.jar; fi"
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: Copy platform jar
+  shell: "cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.cms_platform_filename }}*.jar {{ wcs_info.dirs.wcs_cs_lib }}; chmod 644 {{ wcs_info.dirs.wcs_cs_lib }}/{{ wcs_info.files.cms_platform_filename }}*.jar"
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: Copy Tuckey urlrewrite.xml configuration
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/cs/WEB-INF/{{ wcs_info.files.tuckey_url_rewrite_filename }} {{ wcs_info.dirs.wls_applications_directory }}{{ wcs_info.dirs.wcs_context_path }}WEB-INF
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: Copy wcs properties
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.avios_properties_path }}/{{ wcs_info.files.avios_properties }} {{ wcs_info.dirs.wcs_installed_directory }}/bin
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: Copy presentation object
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/sites/{{ wcs_info.files.presentation_object_filename }} {{ wcs_info.dirs.wcs_installed_directory }}
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: Register third party libs
+  shell: "ls {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.third_party_lib_folder_name }}/*"
+  register: third_party_libs
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: Copy third party libs
+  shell: "cp {{ item }} {{ wcs_info.dirs.wcs_cs_lib }}; chmod u=rw,g=r,o=r {{ wcs_info.dirs.wcs_cs_lib }}/`basename {{ item }}`"
+  with_items: "{{ third_party_libs.stdout_lines|default([]) }}"
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: stop weblogic managed
+  shell: "{{ wcs_info.dirs.wls_cs_domain }}/bin/stopManagedWebLogic.sh {{ wcs_info.dirs.wls_serverName }}"
+  when: wcs_info.flags.restart_weblogic_managed_service is undefined
+  tags:
+    - deploy_wcs
+
+- name: Start weblogic managed
+  shell: nohup ./start 1 &
+  args:
+    chdir: "{{ wcs_info.dirs.wls_cs_domain }}"
+  when: wcs_info.flags.restart_weblogic_managed_service is undefined
+  tags:
+    - deploy_wcs
+
+- name: Waiting for the port on the MANAGED server to be open or for a timeout Failure
+  wait_for: port={{ wcs_info.dirs.wcs_install_webserver_port }} delay=2 timeout=15001 state=started
+  register: timeout_port_4001
+  failed_when: timeout_port_4001.elapsed > 15000
+  when: wcs_info.flags.restart_weblogic_managed_service is undefined
+  tags:
+    - deploy_wcs
+
+# DEPLOY SITES
+
+# Copy contentes of AssetTypes to target
+- name:  Copy contents of AssetTypes folder to target
+  shell: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}{{ wcs_info.files.asset_types_path }}/* {{ wcs_info.dirs.wls_applications_directory }}{{ wcs_info.files.asset_types_path }}
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+# Copy csdt code import script
+- name: Copy csdt CODE import script
+  template:
+            src=../files/{{ wcs_info.files.csdt_script_code_base_filename }}_{{ wcs_info.dirs.wcs_deployment_mode }}.sh
+            dest={{ wcs_info.dirs.wcs_deployment_directory_scripts }}/{{ wcs_info.files.csdt_script_code_base_filename }}_{{ wcs_info.dirs.wcs_deployment_mode }}.sh
+            mode="u+x"
+            owner={{ wcs_info.creds.fs_username }}
+            group={{ wcs_info.creds.fs_groupname }}
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+# Remove existing cs_workspace if exists
+- name: Check if the existing cs_workspace exists
+  stat: path={{ wcs_info.dirs.wcs_cs_workspace }}
+  register: wcs_cs_workspace_stat
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- name: Delete existing cs_workspace
+  file:
+        path={{ wcs_info.dirs.wcs_cs_workspace }}
+        state=absent
+        owner={{ wcs_info.creds.fs_username }}
+        group={{ wcs_info.creds.fs_groupname }}
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs and wcs_cs_workspace_stat.stat.exists == True
+  tags:
+    - deploy_wcs
+
+# Copy cs_workspace to wcs
+- name:  Copy cs_workspace to sites
+  command: cp -r {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/cs_workspace {{ wcs_info.dirs.wcs_cs_workspace }}
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+# Execute csdt code import script
+- name:  Execute CSDT CODE import
+  shell: "{{ wcs_info.dirs.wcs_deployment_directory_scripts }}/{{ wcs_info.files.csdt_script_code_base_filename }}_{{ wcs_info.dirs.wcs_deployment_mode }}.sh"
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+# Check for the existence of CSDT import log file
+- name: Check for the existence of CSDT import log file
+  stat: path={{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/csdt-client/deployment.log
+  register: csdt_import_log_file
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+# Copy import log to logs dir
+- name:  Copy log file
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/csdt-client/deployment.log {{ wcs_info.dirs.manifesto_logs }}
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs and csdt_import_log_file.stat.exists
+  tags:
+    - deploy_wcs
+
+# Create the catalogmover.sh file and copy over
+- name: Copy catalog mover script to server
+  template: src=../files/catalogmover.sh
+            dest={{ wcs_info.dirs.wcs_deployment_directory_scripts }}
+            owner={{ wcs_info.creds.fs_username }}
+            group={{ wcs_info.creds.fs_groupname }}
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+# touch the same file, but add an execute permissions
+- name: Update the execute permissions for catalogmover.sh
+  file: path={{ wcs_info.dirs.wcs_deployment_directory_scripts }}/catalogmover.sh
+        state=touch
+        mode="u+x"
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+- include_vars: catalogFilesToImport.yml
+  tags:
+    - deploy_wcs
+
+# do the catalog import from there
+- name: Import elements using Catalog Mover
+  shell: '{{ wcs_info.dirs.wcs_deployment_directory_scripts }}/catalogmover.sh
+              -b {{ wcs_info.urls.catalog_manager_url }}
+              -u {{ wcs_info.creds.wcs_username }}
+              -p {{ wcs_info.creds.wcs_password }}
+              -x import
+              -f {{ wcs_info.dirs.wcs_deployment_directory}}/{{ wcs_info.files.package_filename }}/sites/catalogs/{{ item }}'
+  with_items: "{{ catalog_files_to_import }}"
+  when: wcs_info.flags.deploy_wcs is undefined or wcs_info.flags.deploy_wcs
+  tags:
+    - deploy_wcs
+
+# Corrects Start Menu Item Default Dimension/Locale Asset Id with Environment Specific One.
+# Also, this task fails if the response is not 200 Ok or if the response body doesn't contain 'Startmenu update completed successfully'
+- name: Fix Start Menu Items Default Locale
+  uri:
+    url: "{{ wcs_info.urls.content_server_url }}?pagename=Avios/Build/FixStartMenuLocale"
+    return_content: yes
+  register: fix_start_menu_item_default_locale_result
+  failed_when: fix_start_menu_item_default_locale_result.status != 200 or 'Startmenu update completed successfully' not in fix_start_menu_item_default_locale_result.content
+
+# DEPLOY WEBAPP
+# Copy webapp undeployment script
+- name: Copy undeployment script
+  template:
+            src=../files/undeploy-webapp.py
+            dest={{ wcs_info.dirs.wcs_deployment_directory_webapp }}
+            owner={{ wcs_info.creds.fs_username }}
+            group={{ wcs_info.creds.fs_groupname }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+# Copy webapp deployment script
+- name: Copy deployment script
+  template:
+            src=../files/deploy-webapp.py
+            dest={{ wcs_info.dirs.wcs_deployment_directory_webapp }}
+            owner={{ wcs_info.creds.fs_username }}
+            group={{ wcs_info.creds.fs_groupname }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+# Copy application.properties
+- name: Copy application.properties to classpath
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.webapp_properties_filename }} {{ wcs_info.dirs.wls_cs_domain }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+# Copy op_log.properties
+- name: Copy op_log.properties to classpath
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.op_logging_properties_filename }} {{ wcs_info.dirs.wls_cs_domain }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+# Copy proxy.properties
+- name: Copy proxy.properties to classpath
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.proxy_properties_filename }} {{ wcs_info.dirs.wls_cs_domain }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+   - deploy_webapp
+
+# Copy message-bundles
+- name: Copy message-bundles to classpath
+  command: cp -r {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.message_bundles_directory }} {{ wcs_info.dirs.wls_cs_domain }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+   - deploy_webapp
+
+# Undeploy existing webapp
+- name:  Undeploy existing webapp
+  shell: "{{ wcs_info.dirs.app_server_path }}/common/bin/wlst.sh {{ wcs_info.dirs.wcs_deployment_directory_webapp}}/undeploy-webapp.py >> {{ wcs_info.dirs.manifesto_logs}}/undeploy.log 2>&1"
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+# Copy webapp deployment war
+- name: Copy webapp deployment war
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.webapp_filename }} {{ wcs_info.dirs.wcs_deployment_directory_webapp }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+# Copy proxy deployment war
+- name: Copy proxy deployment war
+  command: cp {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.proxy_filename }} {{ wcs_info.dirs.wcs_deployment_directory_webapp }}
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+# Execute webapp deployment
+- name:  Execute webapp deployment
+  shell: "{{ wcs_info.dirs.app_server_path }}/common/bin/wlst.sh {{ wcs_info.dirs.wcs_deployment_directory_webapp}}/deploy-webapp.py >> {{ wcs_info.dirs.manifesto_logs}}/deploy.log 2>&1"
+  when: wcs_info.flags.deploy_webapps is undefined or wcs_info.flags.deploy_webapps
+  tags:
+    - deploy_webapp
+
+- name: Copies web-assets onto apache document root
+  command: cp -r {{ wcs_info.dirs.wcs_deployment_directory }}/{{ wcs_info.files.package_filename }}/{{ wcs_info.files.web_assets_directory }} {{ wcs_info.dirs.apache_htdocs }}
+  become: yes
+  become_user: root
+  when: wcs_info.flags.deploy_web_assets is defined and wcs_info.flags.deploy_web_assets
+  tags:
+   - deploy_webapp
+
+- name: Sets permission for web-assets directory
+  file:
+    path: "{{ wcs_info.dirs.apache_htdocs }}/{{ wcs_info.files.web_assets_directory }}"
+    owner: weblogic
+    group: weblogic
+    mode: "u=rwx,g=rx,o=rx"
+    recurse: yes
+  become: yes
+  become_user: root
+  when: wcs_info.flags.deploy_web_assets is defined and wcs_info.flags.deploy_web_assets
+  tags:
+   - deploy_webapp
+
+- name: Restart weblogic managed service
+  service:
+    name: weblogic_managed
+    state: restarted
+  when: wcs_info.flags.restart_weblogic_managed_service is defined and wcs_info.flags.restart_weblogic_managed_service
+  become: yes
+  become_user: root
+  tags:
+    - deploy_wcs
+    - restart_weblogic_managed_service
+
+- name: Notifies avios (slack) channel that the deployment has been completed
+  slack:
+    token: "{{ wcs_info.slack.token }}"
+    msg: '@channel ... Deployment completed at {{ ansible_date_time.date }}-{{ ansible_date_time.time }}'
+    channel: "{{ wcs_info.slack.channel }}"
+    icon_emoji: ":champagne:"
+    username: "Deployment to {{ inventory_hostname }}"
+  when: wcs_info.flags.notify_slack is defined and wcs_info.flags.notify_slack
+  tags:
+    - slack
+    - complete
+    - deploy_wcs
+    - deploy_webapp
