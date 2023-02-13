@@ -6,7 +6,7 @@
     msg: '@channel ... Deployment started at {{ ansible_date_time.date }}-{{ ansible_date_time.time }}'
     channel: "{{ wcs_info.slack.channel }}"
     icon_emoji: ":runner:"
-    username: "Deployment to {{ inventory_hostname }}"
+    username: "Deployments to {{ inventory_hostname }}"
   when: wcs_info.flags.notify_slack is defined and wcs_info.flags.notify_slack
   tags:
     - slack
